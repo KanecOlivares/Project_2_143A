@@ -1,7 +1,7 @@
 ### Fill in the following information before submitting
 # Group id: 42
 # Members: Dylan Tanaka, Nathan Loo, Kanec Olivares
-
+# python simulator.py simulations/BadAddresses1.json output.txt
 
 
 
@@ -78,7 +78,7 @@ class Kernel:
     # Called before the simulation begins.
     # Use this function to initilize any variables you need throughout the simulation.
     # DO NOT rename or delete this method. DO NOT change its arguments.
-    def __init__(self, scheduling_algorithm: str, logger, mmu: "MMU", memory_size: int, mmu: "MMU", memory_size: int):
+    def __init__(self, scheduling_algorithm: str, logger, mmu: "MMU", memory_size: int):
         self.scheduling_algorithm = scheduling_algorithm
         self.ready_queue = deque()
         self.waiting_queue = deque()
@@ -333,24 +333,29 @@ class MMU:
     # Translate the virtual address to its physical address.
     # If it is not a valid address for the given process, return None which will cause a segmentation fault.
     # DO NOT rename or delete this method. DO NOT change its arguments.
+ 
     def translate(self, address: int, pid: PID) -> int | None:
         for seg in self.address_table:
             if seg.pid == pid and seg.in_use:
-                if 0 <= address < seg.size:
-                    return seg.base + address  
-        return None  
+                offset = address - 0x20000000
+                if 0 <= offset < seg.size:
+                    return seg.base + offset
+        self.logger.log("Bad translation")
+        return None
 
     def allocate_memory(self, memory_amt: int, pid: PID) -> bool:
         smallest_index = -1
         smallest_size = float("inf")
+        # self.logger.log(f'PID: {pid} Mem_amt: {memory_amt}')
         for i, s in enumerate(self.address_table):
+            # self.logger.log(f"Size: {s.size}, Index: {i}")
             if not s.in_use and s.size >= memory_amt and s.size < smallest_size:
                 smallest_index = i
                 smallest_size = s.size
     
         if smallest_index == -1:
             return False
-
+        # self.logger.log(f'Smallest index {smallest_index}, size: {smallest_size}')
         self.address_table[smallest_index].in_use = True
 
         if self.address_table[smallest_index].size > memory_amt: # If memory is smaller than size of segment then split the rest into a free segment
