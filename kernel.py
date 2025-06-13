@@ -2,393 +2,396 @@
 # Group id: 42
 # Members: Dylan Tanaka, Nathan Loo, Kanec Olivares
 
+
+
 from collections import deque
+from dataclasses import dataclass
 
 # PID is just an integer, but it is used to make it clear when a integer is expected to be a valid PID.
 PID = int
+
+BACKGROUND: str = "Background"
+FOREGROUND: str = "Foreground"
 
 # This class represents the PCB of processes.
 # It is only here for your convinience and can be modified however you see fit.
 class PCB:
     pid: PID
     priority: int
-    def __init__(self, pid: PID, priority: int = -1):
+    num_quantum_ticks: int
+    process_type: str
+
+    def __init__(self, pid: PID, priority: int, process_type: str):
         self.pid = pid
         self.priority = priority
+        self.num_quantum_ticks = 0
+        self.process_type = process_type
 
-# class Mutex:
-#     lock: bool
-#     def __init__(self, lock: bool = False):
-#         self.lock = lock
+    def __str__(self):
+        return f"({self.pid}, {self.priority})"
+    
+    def __repr__(self):
+        return f"({self.pid}, {self.priority})"
 
-# class Semaphore:
-#     init_val: int
-#     initialized: bool
-#     def __init__(self, init_val: int = 0, initialized: bool = False):
-#         self.init_val = int
-#         self.initialized = initialized
-        
+@dataclass
+class Semaphore:
+    value: int
+    waiting: deque[PCB]
+
+class Mutex:
+    semaphore: Semaphore
+
+    def __init__(self):
+        # A mutex is essentially a semaphore with a value of 1
+        self.semaphore = Semaphore(1, deque())
+
+RR_QUANTUM_TICKS: int = 4
+ACTIVE_QUEUE_NUM_TICKS: int = 20
+
+MULTILEVEL: str = "Multilevel"
+RR: str = "RR"
+FCFS: str = "FCFS"
+PRIORITY: str = "Priority"
+
 # This class represents the Kernel of the simulation.
 # The simulator will create an instance of this object and use it to respond to syscalls and interrupts.
 # DO NOT modify the name of this class or remove it.
 class Kernel:
     scheduling_algorithm: str
     ready_queue: deque[PCB]
-    waiting_queue: dict
+    waiting_queue: deque[PCB]
     running: PCB
     idle_pcb: PCB
-    sem_list: list # key: sem_num value: number of semphors left
-    mutex_list: list
+    semaphores: dict[int, Semaphore]
+    mutexes: dict[int, Mutex]
+    fcfs_ready_queue: deque[PCB]
+    rr_ready_queue: deque[PCB]
+    active_queue: str
+    active_queue_num_ticks: int
 
     # Called before the simulation begins.
-    # Use this method to initilize any variables you need throughout the simulation.
+    # Use this function to initilize any variables you need throughout the simulation.
     # DO NOT rename or delete this method. DO NOT change its arguments.
-    def __init__(self, scheduling_algorithm: str, logger):
+    def __init__(self, scheduling_algorithm: str, logger, mmu: "MMU", memory_size: int):
         self.scheduling_algorithm = scheduling_algorithm
         self.ready_queue = deque()
-        self.waiting_queue = {} # key: resources being waited for value: list of pcbs waiting for resource
-        self.idle_pcb = PCB(0)
+        self.waiting_queue = deque()
+        self.idle_pcb = PCB(0, 0, "Foreground")
         self.running = self.idle_pcb
+        self.semaphores = dict()
+        self.mutexes = dict()
         self.logger = logger
-        
-        self.current_process_run_time = 0  # For keeping track of time for RR
+        self.fcfs_ready_queue = deque()
+        self.rr_ready_queue = deque()
+        self.active_queue = FOREGROUND
+        self.active_queue_num_ticks = 0
 
-        if self.scheduling_algorithm == "Multilevel":
-            self.fg = Kernel("RR", logger)
-            self.bg = Kernel("FCFS", logger)
-        self.level = "fg"
-        self.ml_runtime = 0
+        self.mmu = mmu
+        self.mmu.set_mem_size(memory_size)
 
-        # This is for the semophor and mutex part
-        self.sem_list = []
-        self.mutex_list = []
-
-    # This method is triggered every time a new process has arrived.
+    # This function is triggered every time a new process has arrived.
     # new_process is this process's PID.
     # priority is the priority of new_process.
     # DO NOT rename or delete this method. DO NOT change its arguments.
-    def new_process_arrived(self, new_process: PID, priority: int, process_type: str) -> PID:
-        if self.scheduling_algorithm == "Multilevel":
-            fg_running, bg_running = self.fg.running.pid, self.bg.running.pid
-            if process_type == "Foreground":
-                fg_running = self.fg.new_process_arrived(new_process, priority, process_type)
-            elif process_type == "Background":
-                bg_running = self.bg.new_process_arrived(new_process, priority, process_type)
+    def new_process_arrived(self, new_process: PID, priority: int, process_type: str, memory_needed: int) -> PID:
+        mem = self.mmu.allocate_memory(memory_needed, new_process)
+        if not mem:
+            return -1
 
-            if self.level == "fg":
-                if fg_running == 0 and (self.bg.running is not self.bg.idle_pcb or len(self.bg.ready_queue)!= 0):
-                    self.ml_runtime = 0
-                    #self.logger.log("switched to bg")
-                    self.level = "bg"
-                    return self.bg.running.pid
-                else:
-                    return fg_running
-            elif self.level == "bg":
-                if bg_running == 0 and (self.fg.running is not self.fg.idle_pcb or len(self.fg.ready_queue) != 0):
-                    self.ml_runtime = 0
-                    #self.logger.log("switched to fg")
-                    self.level = "fg"
-                    return self.fg.running.pid
-                else:
-                    return bg_running
-                
-        new_PCB = PCB(new_process, priority)
-        self.ready_queue.append(new_PCB)        
+        self.ready_queue.append(PCB(new_process, priority, process_type))
         
-        if self.scheduling_algorithm == "RR" or self.scheduling_algorithm == "FCFS":
-            if self.running is self.idle_pcb:
-                self.running = self.choose_next_process()
-            return self.running.pid
-       
-        elif self.scheduling_algorithm == "Priority":
-            self.running = self.choose_next_process()
-            return self.running.pid
+        # Neither queue was active, so when a process arrives, it is the start of a new queue
+        if self.scheduling_algorithm == MULTILEVEL and self.running is self.idle_pcb:
+            self.active_queue_num_ticks = 0
+        self.choose_next_process()
+        return self.running.pid  
 
-    def p(self, msg):
-        if True:
-            self.logger.log(msg)
-
-    # This method is triggered every time the current process performs an exit syscall.
+    # This function is triggered every time the current process performs an exit syscall.
     # DO NOT rename or delete this method. DO NOT change its arguments.
     def syscall_exit(self) -> PID:
-        if self.scheduling_algorithm == "Multilevel":
-            if self.level == "fg":
-                running = self.fg.syscall_exit()
-                if running == 0 and (self.bg.running is not self.bg.idle_pcb or len(self.bg.ready_queue)!= 0):
-                    self.ml_runtime = 0
-                    self.level = "bg"
-                    return self.bg.running.pid
-                else:
-                    return running
-            elif self.level == "bg":
-                running = self.bg.syscall_exit()
-                if running == 0 and (self.fg.running is not self.fg.idle_pcb or len(self.fg.ready_queue) != 0):
-                    self.ml_runtime = 0
-                    self.level = "fg"
-                    return self.fg.running.pid
-                else:
-                    return running
+        self.mmu.free_memory(self.running.pid)
 
-        if self.scheduling_algorithm == "Priority":
-            self.ready_queue.remove(self.running)
-            self.running = self.choose_next_process()
-            return self.running.pid
-
-        if self.scheduling_algorithm == "RR" or self.scheduling_algorithm == "FCFS":
-            self.running = self.choose_next_process()
-            return self.running.pid
-
-    # This method is triggered when the currently running process requests to change its priority.
+        self.running = self.idle_pcb
+        self.choose_next_process()
+        return self.running.pid
+    
+    # This function is triggered when the currently running process requests to change its priority.
     # DO NOT rename or delete this method. DO NOT change its arguments.
     def syscall_set_priority(self, new_priority: int) -> PID:
-        if self.scheduling_algorithm == "Multilevel":
-            if self.level == "fg":
-                return self.fg.syscall_set_priority(new_priority)
-            elif self.level == "bg":
-                return self.bg.syscall_set_priority(new_priority)
-
         self.running.priority = new_priority
-        self.running = self.choose_next_process()
+        self.choose_next_process()
         return self.running.pid
 
 
     # This is where you can select the next process to run.
-    # This method is not directly called by the simulator and is purely for your convinience.
-    # Feel free to modify this method as you see fit.
-    # It is not required to actually use this method but it is recommended.
-    def choose_next_process(self) -> PCB:
-        if len(self.ready_queue) == 0:
-            return self.idle_pcb
+    # This function is not directly called by the simulator and is purely for your convinience.
+    # It is not required to actually use this function but it is recommended.
+    def choose_next_process(self):
+        if self.scheduling_algorithm == FCFS:
+            self.fcfs_chose_next_process(self.ready_queue)
+        elif self.scheduling_algorithm == PRIORITY:
+            if len(self.ready_queue) == 0:
+                return
+            
+            if self.running is not self.idle_pcb:
+                self.ready_queue.append(self.running)
 
-        if self.scheduling_algorithm == "FCFS":
-            return self.ready_queue.popleft()
+            next_process = pop_min_priority(self.ready_queue)
+            self.running = next_process
+        elif self.scheduling_algorithm == RR:
+            self.rr_chose_next_process(self.ready_queue)
+        elif self.scheduling_algorithm == MULTILEVEL:
+            # Move everything in standard ready queue to proper queues
+            while len(self.ready_queue) > 0:
+                pcb = self.ready_queue.popleft()
+                if pcb.process_type == FOREGROUND:
+                    self.rr_ready_queue.append(pcb)
+                elif pcb.process_type == BACKGROUND:
+                    self.fcfs_ready_queue.append(pcb)
+                else:
+                    print("Unknown process type")
+            
+            if self.active_queue == FOREGROUND:
+                # RR queue
+                self.rr_chose_next_process(self.rr_ready_queue)
+            elif self.active_queue == BACKGROUND:
+                # FCFS queue
+                self.fcfs_chose_next_process(self.fcfs_ready_queue)
+                   
+            # If we have nothing to run in the current queue switch the queue
+            if self.running is self.idle_pcb:
+                self.switch_active_queue()
+                if self.active_queue == FOREGROUND:
+                    # RR queue
+                    self.rr_chose_next_process(self.rr_ready_queue)
+                elif self.active_queue == BACKGROUND:
+                    # FCFS queue
+                    self.fcfs_chose_next_process(self.fcfs_ready_queue)
+            
+        else:
+            print("Unknown scheduling algorithm")
 
-        elif self.scheduling_algorithm == "Priority":
-            smallest_priority = self.ready_queue[0]
-            for process in self.ready_queue:
-                if process.priority < smallest_priority.priority:
-                    smallest_priority = process
-            # self.print(smallest_priority.pid)
-            return smallest_priority
-
-        elif self.scheduling_algorithm == "RR": 
-            """
-            running is:  x 
-            An example: ready_queue (a, b, c)
-            push to the back (a , b, c, x)
-            then pop_left (b, c, x)
-            returns a. 
-            """
-            self.current_process_run_time = 0
-            # self.ready_queue.append(self.running) this is done at interupt function
-            return self.ready_queue.popleft()
+    def rr_chose_next_process(self, queue: deque[PCB]):
+        if self.running is self.idle_pcb:
+            if len(queue) == 0:
+                return
         
+            self.running = queue.popleft()
+        elif exceeded_quantum(self.running):
+            # Put on end of queue and run next process
+            queue.append(self.running)
+            self.running = queue.popleft()
 
+    def fcfs_chose_next_process(self, queue: deque[PCB]):
+        if len(queue) == 0:
+            return
+        
+        if self.running is self.idle_pcb:
+            # Lower pid was the first to arrive
+            self.running = pop_min_pid(queue)
 
-    # This method is triggered when the currently running process requests to initialize a new semaphore.
+    def switch_active_queue(self):
+        # Reset the number of ticks with the active queue
+        self.active_queue_num_ticks = 0
+
+        if self.active_queue == FOREGROUND:
+            # If background has no processes do nothing.
+            if len(self.fcfs_ready_queue) == 0:
+                return
+            
+            if self.running is not self.idle_pcb:
+                # If the running process should be switched out, move it to the back before switching
+                if exceeded_quantum(self.running):
+                    self.rr_ready_queue.append(self.running)
+                    self.running = self.idle_pcb
+                # If the running process should not be switched out, make it run first when we switch back
+                else:
+                    self.rr_ready_queue.appendleft(self.running)
+                    self.running = self.idle_pcb
+
+            self.active_queue = BACKGROUND
+        elif self.active_queue == BACKGROUND:
+            # If foreground has no processes do nothing.
+            if len(self.rr_ready_queue) == 0:
+                return
+
+            if self.running is not self.idle_pcb:
+                self.fcfs_ready_queue.appendleft(self.running)
+                self.running = self.idle_pcb
+            self.active_queue = FOREGROUND
+        else:
+            print("Unknown active queue")
+
+    def semaphore_p(self, semaphore: Semaphore):
+        if semaphore.value <= 0:
+            semaphore.waiting.append(self.running)
+            self.running = self.idle_pcb
+            self.choose_next_process()
+        else:
+            semaphore.value -= 1
+
+    def semaphore_v(self, semaphore: Semaphore):
+        if semaphore.value <= 0 and len(semaphore.waiting) > 0:
+            to_be_released = None
+
+            if self.scheduling_algorithm == PRIORITY:
+                to_be_released = pop_min_priority(semaphore.waiting)
+            else:
+                to_be_released = pop_min_pid(semaphore.waiting)
+
+            self.ready_queue.append(to_be_released)
+            to_be_released.num_quantum_ticks = 0
+            self.choose_next_process()
+            # Don't increment value because we freed a process instead
+        else: 
+            semaphore.value += 1
+
+    # This method is triggered when the currently running process requests to initilize a new semaphore.
     # DO NOT rename or delete this method. DO NOT change its arguments.
     def syscall_init_semaphore(self, semaphore_id: int, initial_value: int):
-        self.sem_list.append(Semophor(semaphore_id, initial_value, self.running.pid))
-        return
-
-    def get_sem(self, semaphor_id):
-        for sem in self.sem_list:
-            if sem.id == semaphor_id:
-                return sem
-        raise Exception(f"No semohpor found for {semaphor_id} running process {self.running.pid}")
-
-
+        self.semaphores[semaphore_id] = Semaphore(initial_value, deque())
+    
     # This method is triggered when the currently running process calls p() on an existing semaphore.
     # DO NOT rename or delete this method. DO NOT change its arguments.
     def syscall_semaphore_p(self, semaphore_id: int) -> PID:
-        sem = self.get_sem(semaphore_id)     
-        sem.acquire(self.running.pid)
-        return self.running.pid
+        self.semaphore_p(self.semaphores[semaphore_id])
+        return self.running.pid 
 
     # This method is triggered when the currently running process calls v() on an existing semaphore.
     # DO NOT rename or delete this method. DO NOT change its arguments.
     def syscall_semaphore_v(self, semaphore_id: int) -> PID:
-        sem = self.get_sem(semaphore_id)
-        sem.release(self.running.pid)
-        return self.running.pid
+        self.semaphore_v(self.semaphores[semaphore_id])
+        return self.running.pid 
 
-    # This method is triggered when the currently running process requests to initialize a new mutex.
+    # This method is triggered when the currently running process requests to initilize a new mutex.
     # DO NOT rename or delete this method. DO NOT change its arguments.
     def syscall_init_mutex(self, mutex_id: int):
-        self.mutex_list.append(Mutex(mutex_id))
-        return
-
-    def get_mutex(self, mutex_id):
-        for mut in self.mutex_list:
-            if mut.id == mutex_id:
-                return mut
-        raise Exception(f"No mutex found for {mutex_id} running process {self.running.pid}")
-
-    
-    def new_waiting(self, mutex_id):
-        if mutex_id in self.waiting_queue:
-            self.waiting_queue[mutex_id].append(self.running)
-        else:
-            self.waiting_queue[mutex_id] = [self.running]
-    
-    def less_waiting(self, mutex):
-        if self.scheduling_algorithm == "RR":
-            sorter = []
-            for pcb in self.waiting_queue[mutex.id]:
-                sorter.append(pcb)
-            sorter.sort(key=lambda x: x.pid)
-            self.ready_queue.append(sorter[0])
-            mutex.lock(sorter[0])
-            self.waiting_queue[mutex.id].remove(sorter[0])
-
-        elif self.scheduling_algorithm == "Priority":
-            sorter = []
-            for pcb in self.waiting_queue[mutex.id]:
-                sorter.append(pcb)
-            sorter.sort(key=lambda x: x.priority)
-            self.ready_queue.append(sorter[0])
-            mutex.lock(sorter[0])
-            self.waiting_queue[mutex.id].remove(sorter[0])
-            self.running = self.choose_next_process()
-    
+        self.mutexes[mutex_id] = Mutex()
 
     # This method is triggered when the currently running process calls lock() on an existing mutex.
     # DO NOT rename or delete this method. DO NOT change its arguments.
     def syscall_mutex_lock(self, mutex_id: int) -> PID:
-        mutex = self.get_mutex(mutex_id)
-        if mutex.is_locked():
-            self.new_waiting(mutex_id)
-            if self.scheduling_algorithm == "Priority" and self.running in self.ready_queue: self.ready_queue.remove(self.running)
-            self.running = self.choose_next_process()
-            return self.running.pid
-        else: # is free to use so update accoringly 
-            mutex.lock(self.running)
-            return mutex.owner.pid
+        self.semaphore_p(self.mutexes[mutex_id].semaphore)
+        return self.running.pid 
 
 
     # This method is triggered when the currently running process calls unlock() on an existing mutex.
     # DO NOT rename or delete this method. DO NOT change its arguments.
     def syscall_mutex_unlock(self, mutex_id: int) -> PID:
-        mutex = self.get_mutex(mutex_id)
-        #self.logger.log(f'{mutex_id} is locked {mutex.is_locked()}')
-        if mutex.is_locked():
-            mutex.unlock(self.running)
-            if mutex_id in self.waiting_queue and len(self.waiting_queue[mutex_id]) > 0:
-                self.less_waiting(mutex)
-        return self.running.pid
+        self.semaphore_v(self.mutexes[mutex_id].semaphore)
+        return self.running.pid 
 
-    # This function represents the hardware timer interrupt.
+    # This function represents the hardware timer intterupt.
     # It is triggered every 10 microseconds and is the only way a kernel can track passing time.
     # Do not use real time to track how much time has passed as time is simulated.
-    # DO NOT rename or delete this method. DO NOT change its arguments.
     def timer_interrupt(self) -> PID:
-        #self.print("rueghiu")
-        if self.scheduling_algorithm == "Multilevel":
-            self.ml_runtime += 10
+        self.running.num_quantum_ticks += 1
+        self.active_queue_num_ticks += 1
 
-            fg_running, bg_running = self.fg.running.pid, self.bg.running.pid
-            if self.level == "fg": fg_running = self.fg.timer_interrupt()
-            #elif self.level == "bg": bg_running = self.bg.timer_interrupt()
-
-            if fg_running == bg_running == 0: # If nothing is running at all multilevel runtime stays at 0
-                self.ml_runtime = 0
-
-            if self.ml_runtime >= 200:
-                self.ml_runtime = 0
-                if self.level == "fg" and (self.bg.running is not self.bg.idle_pcb or len(self.bg.ready_queue) != 0):
-                    #self.logger.log("switched to bg")
-                    self.level = "bg"
-                    return self.bg.running.pid
-                elif self.level == "bg" and (self.fg.running is not self.fg.idle_pcb or len(self.fg.ready_queue) != 0):
-                    #self.logger.log("switched to fg")
-                    self.level = "fg"
-                    return self.fg.running.pid
-            
-            if self.level == "fg": return fg_running
-            elif self.level == "bg": return bg_running
-
-        elif self.scheduling_algorithm == "RR":
-            self.current_process_run_time += 10
-            if self.current_process_run_time >= 40:
-                self.ready_queue.append(self.running)
-                self.running = self.choose_next_process()
-            return self.running.pid
-        
-        elif self.scheduling_algorithm == "Priority":
-            return self.running.pid
-        
+        if self.scheduling_algorithm == RR:
+            self.choose_next_process()
+        elif self.scheduling_algorithm == MULTILEVEL:
+            if self.active_queue_num_ticks >= ACTIVE_QUEUE_NUM_TICKS:
+                self.switch_active_queue()
+            self.choose_next_process()
+        return self.running.pid 
 
 
-class Semophor:
-    class EmptySemophor(Exception):
-        message: str
-        def __init__(self, program, id):
-            self.message = f'{program} tried to accuire a semophor with id: {id} but it is empty'
-            super().__init__(self.message)
-    id = int
-    size: int
-    program_list: list
-
-    def __init__(self, id, size):
-        self.program_list = []
-        self.id = id
+class Segment:
+    def __init__(self, pid: PID, base: int, size: int, in_use):
+        self.pid = pid
+        self.base = base
         self.size = size
+        self.in_use = in_use
 
-    def is_empty(self):
-        return self.size != 0
-    
-    def is_owner(self, program):
-        return True if program in self.program_list else False
-    
-    def acquire(self, program):
-        if self.is_empty():
-            raise self.EmptySemophor(program)
-        self.programs.append(program, self.id)
-        self.size -= 1
+# This class represents the MMU of the simulation.
+# The simulator will create an instance of this object and use it to translate memory accesses.
+# DO NOT modify the name of this class or remove it.
+class MMU:
+    # Called before the simulation begins (even before kernel __init__).
+    # Use this function to initilize any variables you need throughout the simulation.
+    # DO NOT rename or delete this method. DO NOT change its arguments.
+    def __init__(self, logger):
+        self.kernel_size = 10485760
+        self.logger = logger
+        self.address_table = [Segment(-32,0,self.kernel_size, True)] # List of segments.
+        self.total_memory = 0
+        # Initial value is memory allocated for the kernel and free segment of infinite size.
 
-    
-    
-    def release(self, program):
-        if self.is_owner(program):
-            self.program_list.remove(program)
-            self.size += 1
-        
-    
+    def set_mem_size(self, memory_size: int):
+        self.address_table.append(Segment(-1, self.kernel_size, memory_size - self.kernel_size, False))
+        self.total_memory = memory_size
 
-class Mutex:
+    # Translate the virtual address to its physical address.
+    # If it is not a valid address for the given process, return None which will cause a segmentation fault.
+    # DO NOT rename or delete this method. DO NOT change its arguments.
+    def translate(self, address: int, pid: PID) -> int | None:
+        return None
 
-    class InvalidOwnership(Exception):
-        message: str
-        def __init__(self, given_program, owner):
-            self.message = f'{given_program} is not recongized as the owner. Which is {owner}'
-            super().__init__(self.message)
-
-    owner: PCB
-    locked: bool
-    idle_pcb: PCB
-    def __init__(self, id, locked = False):
-        self.id = id
-        self.idle_pcb = PCB(0)
-        self.owner = PCB(0) # no owner default
-        self.locked = locked
-        
-
-    def is_owner(self, program):
-        # if self.owner == idle_pcb then there is no owner
-        return self.owner.pid == program.pid or self.owner == self.idle_pcb
-
-    def is_locked(self):
-        return self.locked
+    def allocate_memory(self, memory_amt: int, pid: PID) -> bool:
+        smallest_index = -1
+        smallest_size = float("inf")
+        for i, s in enumerate(self.address_table):
+            if not s.in_use and s.size >= memory_amt and s.size < smallest_size:
+                smallest_index = i
+                smallest_size = s.size
     
-    def lock(self, program) -> PID:
-        if not self.is_locked():
-            self.owner.pid = program.pid
-            self.locked = True
-        return self.owner
+        if smallest_index == -1:
+            return False
+
+        self.address_table[smallest_index].in_use = True
+
+        if self.address_table[smallest_index].size > memory_amt: # If memory is smaller than size of segment then split the rest into a free segment
+            free_base = self.address_table[smallest_index].base + memory_amt
+            free_size = self.address_table[smallest_index].size - memory_amt
+            self.address_table.append(Segment(-1, free_base, free_size, False))
+            self.address_table.sort(key=lambda x: x.base)
+
+        self.address_table[smallest_index].size = memory_amt
+        self.address_table[smallest_index].pid = pid
+
+        return True
+
+    def free_memory(self, pid: PID) -> None:
+        # Frees memory allocated by the PID, if there is any.
+        pass
+
+    def get_mem_string(self) -> str:
+        # Returns string representing current state of memory. For testing only.
+        string = f"Total mem: {self.total_memory}({self.total_memory/1048576} MB). Table: "
+        for s in self.address_table:
+            string += f'({s.base}({s.base/1048576} MB) - {s.base + s.size}({(s.base + s.size)/1048576} MB): {s.pid}) '
+        return string
+
+    def p(self, msg: str):
+        # "Print" function, which can be "turned off" for submission by setting the if statement to always false.
+        if False:
+            self.logger.log(msg)
+
+def exceeded_quantum(pcb: PCB) -> bool:
+    if pcb.num_quantum_ticks >= RR_QUANTUM_TICKS:
+        pcb.num_quantum_ticks = 0
+        return True
+    else:
+        return False
     
-    def unlock(self, program):
-        if self.is_owner(program):
-            self.owner = self.idle_pcb
-            self.locked = False
-        # else:
-        #     raise self.InvalidOwnership(program, self.owner)
+def pop_min_priority(pcbs: list[PCB]) -> PCB:
+    min_index = 0
+    for i in range(1, len(pcbs)):
+        process = pcbs[i]
+        if process.priority < pcbs[min_index].priority:
+            min_index = i
+        elif process.priority == pcbs[min_index].priority and process.pid < pcbs[min_index].pid:
+            min_index = i
+    popped = pcbs[min_index]
+    del pcbs[min_index]
+    return popped
+
+def pop_min_pid(pcbs: list[PCB]):
+    lowest_pid_i = 0
+    for i in range(1, len(pcbs)):
+        if pcbs[i].pid < pcbs[lowest_pid_i].pid:
+            lowest_pid_i = i
+    popped = pcbs[lowest_pid_i]
+    del pcbs[lowest_pid_i]
+    return popped
