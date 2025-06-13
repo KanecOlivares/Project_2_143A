@@ -4,11 +4,17 @@
 
 
 
+
+
 from collections import deque
+from dataclasses import dataclass
 from dataclasses import dataclass
 
 # PID is just an integer, but it is used to make it clear when a integer is expected to be a valid PID.
 PID = int
+
+BACKGROUND: str = "Background"
+FOREGROUND: str = "Foreground"
 
 BACKGROUND: str = "Background"
 FOREGROUND: str = "Foreground"
@@ -72,12 +78,14 @@ class Kernel:
     # Called before the simulation begins.
     # Use this function to initilize any variables you need throughout the simulation.
     # DO NOT rename or delete this method. DO NOT change its arguments.
-    def __init__(self, scheduling_algorithm: str, logger, mmu: "MMU", memory_size: int):
+    def __init__(self, scheduling_algorithm: str, logger, mmu: "MMU", memory_size: int, mmu: "MMU", memory_size: int):
         self.scheduling_algorithm = scheduling_algorithm
         self.ready_queue = deque()
         self.waiting_queue = deque()
         self.idle_pcb = PCB(0, 0, "Foreground")
         self.running = self.idle_pcb
+        self.semaphores = dict()
+        self.mutexes = dict()
         self.semaphores = dict()
         self.mutexes = dict()
         self.logger = logger
@@ -326,7 +334,11 @@ class MMU:
     # If it is not a valid address for the given process, return None which will cause a segmentation fault.
     # DO NOT rename or delete this method. DO NOT change its arguments.
     def translate(self, address: int, pid: PID) -> int | None:
-        return None
+        for seg in self.address_table:
+            if seg.pid == pid and seg.in_use:
+                if 0 <= address < seg.size:
+                    return seg.base + address  
+        return None  
 
     def allocate_memory(self, memory_amt: int, pid: PID) -> bool:
         smallest_index = -1
@@ -354,7 +366,28 @@ class MMU:
 
     def free_memory(self, pid: PID) -> None:
         # Frees memory allocated by the PID, if there is any.
-        pass
+        self.mark_segs_free(pid)
+        self.merge_segs()
+
+
+    def mark_segs_free(self, pid: PID) -> None:
+        for seg in self.address_table:
+            if seg.pid == pid:
+                seg.in_use = False
+                seg.pid = -1
+    
+    def merge_segs(self):
+        i = 0
+        while i < len(self.address_table) - 1:
+            current = self.address_table[i]
+            next_seg = self.address_table[i + 1]
+
+            if not current.in_use and not next_seg.in_use:
+                current.size += next_seg.size
+                del self.address_table[i + 1]
+            else:
+                i += 1
+
 
     def get_mem_string(self) -> str:
         # Returns string representing current state of memory. For testing only.
@@ -365,6 +398,7 @@ class MMU:
 
     def p(self, msg: str):
         # "Print" function, which can be "turned off" for submission by setting the if statement to always false.
+        # if False: # TODO UNCOMMENT FOR SUBMISSION
         if False:
             self.logger.log(msg)
 
